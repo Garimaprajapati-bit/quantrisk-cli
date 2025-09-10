@@ -1,0 +1,7 @@
+com/quantrisk/QuantRiskCLI.class
+com/quantrisk/VaRResult.class
+com/quantrisk/MonteCarloResult.class
+com/quantrisk/MarketDataFetcher.class
+com/quantrisk/StressTestResult.class
+com/quantrisk/RiskCalculator.class
+com/quantrisk/Portfolio.class

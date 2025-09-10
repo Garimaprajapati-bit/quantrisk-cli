@@ -1,0 +1,265 @@
+name: QuantRisk CLI - Build & Deploy
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 9 * * 1-5'  # 9 AM weekdays - daily risk check
+
+env:
+  JAVA_VERSION: '17'
+  MAVEN_OPTS: '-Xmx1024m'
+
+jobs:
+  # ===============================
+  # BUILD & TEST
+  # ===============================
+  build:
+    runs-on: ubuntu-latest
+    name: 🔨 Build & Test
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: ☕ Setup Java 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ env.JAVA_VERSION }}
+        distribution: 'temurin'
+        cache: maven
+        
+    - name: 🔍 Validate Maven Structure
+      run: |
+        if [ ! -f pom.xml ]; then
+          echo "❌ pom.xml not found!"
+          exit 1
+        fi
+        echo "✅ Maven structure validated"
+        
+    - name: 🏗️ Compile Application
+      run: mvn clean compile
+      
+    - name: 🧪 Run Unit Tests
+      run: mvn test
+      
+    - name: 📦 Package JAR
+      run: mvn package -DskipTests
+      
+    - name: ✅ Verify JAR Creation
+      run: |
+        if [ ! -f target/quantrisk.jar ]; then
+          echo "❌ JAR file not created!"
+          exit 1
+        fi
+        echo "✅ JAR file created successfully"
+        ls -la target/quantrisk.jar
+        
+    - name: 💾 Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: quantrisk-jar
+        path: target/quantrisk.jar
+        retention-days: 30
+
+  # ===============================
+  # RISK VALIDATION TESTS
+  # ===============================
+  risk-validation:
+    runs-on: ubuntu-latest
+    needs: build
+    name: 📊 Risk Calculation Tests
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: ☕ Setup Java
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ env.JAVA_VERSION }}
+        distribution: 'temurin'
+        
+    - name: 📥 Download JAR
+      uses: actions/download-artifact@v4
+      with:
+        name: quantrisk-jar
+        path: target/
+        
+    - name: 🧮 Test Basic VaR Calculation
+      run: |
+        echo "symbol,weight,price,quantity" > test_portfolio.csv
+        echo "AAPL,0.5,150.0,100" >> test_portfolio.csv
+        echo "MSFT,0.5,300.0,50" >> test_portfolio.csv
+        
+        # Run risk calculation
+        java -jar target/quantrisk.jar --portfolio test_portfolio.csv > risk_output.json
+        
+        # Validate output
+        if [ ! -s risk_output.json ]; then
+          echo "❌ Risk calculation failed - no output"
+          exit 1
+        fi
+        
+        # Check if VaR is reasonable (between 0.5% and 10%)
+        VAR_PERCENT=$(jq -r '.varPercentage' risk_output.json)
+        if (( $(echo "$VAR_PERCENT < 0.5 || $VAR_PERCENT > 10.0" | bc -l) )); then
+          echo "❌ VaR percentage unrealistic: $VAR_PERCENT%"
+          exit 1
+        fi
+        
+        echo "✅ VaR calculation successful: $VAR_PERCENT%"
+        
+    - name: 📊 Performance Benchmark
+      run: |
+        echo "🏁 Performance Test - 1000 iterations"
+        time for i in {1..1000}; do
+          java -jar target/quantrisk.jar --portfolio test_portfolio.csv > /dev/null
+        done
+        
+    - name: 💾 Save Test Results
+      run: |
+        echo "Test Results - $(date)" > test_results.txt
+        echo "VaR: $(jq -r '.varPercentage' risk_output.json)%" >> test_results.txt
+        cat risk_output.json >> test_results.txt
+        
+    - name: 📤 Upload Test Results
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: |
+          test_results.txt
+          risk_output.json
+
+  # ===============================
+  # DOCKER BUILD & PUSH
+  # ===============================
+  docker:
+    runs-on: ubuntu-latest
+    needs: [build, risk-validation]
+    name: 🐳 Docker Build & Push
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 📥 Download JAR
+      uses: actions/download-artifact@v4
+      with:
+        name: quantrisk-jar
+        path: target/
+        
+    - name: 🔑 Login to DockerHub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+        
+    - name: 🏗️ Build & Push Docker Image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: |
+          ${{ secrets.DOCKERHUB_USERNAME }}/quantrisk-cli:latest
+          ${{ secrets.DOCKERHUB_USERNAME }}/quantrisk-cli:${{ github.sha }}
+
+  # ===============================
+  # DAILY RISK MONITORING
+  # ===============================
+  daily-risk-check:
+    runs-on: ubuntu-latest
+    name: 📈 Daily Risk Monitoring
+    if: github.event_name == 'schedule'
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: ☕ Setup Java
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ env.JAVA_VERSION }}
+        distribution: 'temurin'
+        
+    - name: 🏗️ Build Latest Version
+      run: mvn clean package -DskipTests
+      
+    - name: 📊 Run Risk Analysis on Sample Portfolio
+      run: |
+        # Create sample portfolio representing current positions
+        echo "symbol,weight,price,quantity" > daily_portfolio.csv
+        echo "AAPL,0.25,175.0,200" >> daily_portfolio.csv
+        echo "MSFT,0.25,380.0,100" >> daily_portfolio.csv
+        echo "GOOGL,0.25,2800.0,20" >> daily_portfolio.csv
+        echo "TSLA,0.25,250.0,150" >> daily_portfolio.csv
+        
+        # Calculate risk
+        java -jar target/quantrisk.jar --portfolio daily_portfolio.csv > daily_risk.json
+        
+        # Extract key metrics
+        VAR_PERCENT=$(jq -r '.varPercentage' daily_risk.json)
+        VAR_AMOUNT=$(jq -r '.vaR' daily_risk.json)
+        PORTFOLIO_VALUE=$(jq -r '.portfolioValue' daily_risk.json)
+        
+        echo "📊 Daily Risk Report - $(date +%Y-%m-%d)"
+        echo "Portfolio Value: \$$(printf '%.0f' $PORTFOLIO_VALUE)"
+        echo "VaR (95%): \$$(printf '%.0f' $VAR_AMOUNT) ($VAR_PERCENT%)"
+        
+        # Risk threshold check
+        if (( $(echo "$VAR_PERCENT > 3.0" | bc -l) )); then
+          echo "🚨 ALERT: VaR exceeds 3% threshold!"
+          echo "RISK_BREACH=true" >> $GITHUB_ENV
+        else
+          echo "✅ Risk within acceptable limits"
+          echo "RISK_BREACH=false" >> $GITHUB_ENV
+        fi
+        
+    - name: 🚨 Send Risk Alert (if breach)
+      if: env.RISK_BREACH == 'true'
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        text: "🚨 RISK ALERT: Portfolio VaR exceeded 3% threshold!"
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        
+    - name: 📧 Email Daily Report
+      uses: dawidd6/action-send-mail@v3
+      with:
+        server_address: smtp.gmail.com
+        server_port: 587
+        username: ${{ secrets.EMAIL_USERNAME }}
+        password: ${{ secrets.EMAIL_PASSWORD }}
+        subject: "Daily Risk Report - $(date +%Y-%m-%d)"
+        body: file://daily_risk.json
+        to: risk-team@company.com
+        from: quantrisk-bot@company.com
+        attachments: daily_risk.json
+
+  # ===============================
+  # SECURITY SCANNING
+  # ===============================
+  security:
+    runs-on: ubuntu-latest
+    needs: build
+    name: 🔒 Security Scan
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🔍 Run Dependency Check
+      uses: dependency-check/Dependency-Check_Action@main
+      with:
+        project: 'quantrisk-cli'
+        path: '.'
+        format: 'ALL'
+        
+    - name: 📤 Upload Security Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-report
+        path: reports/
