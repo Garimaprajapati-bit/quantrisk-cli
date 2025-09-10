@@ -1,7 +1,7 @@
 Command-line risk calculator for investment banks and hedge funds. 
 
 # Quick Start
-bash# Java
+
 git clone https://github.com/yourusername/quantrisk-cli.git
 mvn clean package && java -jar target/quantrisk.jar
 
